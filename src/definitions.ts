@@ -1,3 +1,7 @@
+import { Authentication, User } from './user';
 export interface GoogleAuthPlugin {
-  echo(options: { value: string }): Promise<{ value: string }>;
+  signIn(): Promise<User>;
+  refresh(): Promise<Authentication>;
+  isSignedIn(): boolean;
+  signOut(): Promise<any>;
 }

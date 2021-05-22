@@ -1,10 +1,130 @@
 import { WebPlugin } from '@capacitor/core';
-
+import { Authentication, User } from './user';
 import type { GoogleAuthPlugin } from './definitions';
 
 export class GoogleAuthWeb extends WebPlugin implements GoogleAuthPlugin {
-  async echo(options: { value: string }): Promise<{ value: string }> {
-    console.log('ECHO', options);
-    return options;
+
+  gapiLoaded!: Promise<void>;
+
+  get webConfigured(): boolean {
+    if (typeof document !== 'undefined') {
+      return document.getElementsByName('google-signin-client_id').length > 0;
+    } else {
+      return false;
+    }
+  }
+
+  constructor() {
+    super();
+
+    if (!this.webConfigured)
+      return;
+
+    this.gapiLoaded = new Promise(resolve => {
+      // HACK: Relying on window object, can't get property in gapi.load callback
+      (window as any).gapiResolve = resolve;
+      this.initialize();
+    });
+
+    this.addUserChangeListener();
+  }
+
+  initialize() {
+    var head = document.getElementsByTagName('head')[0];
+    var script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.defer = true;
+    script.async = true;
+    script.onload = this.platformJsLoaded;
+    script.src = 'https://apis.google.com/js/platform.js';
+    head.appendChild(script);
+  }
+
+  platformJsLoaded() {
+    gapi.load('auth2', () => {
+      const clientConfig: gapi.auth2.ClientConfig = {
+        client_id: (document.getElementsByName('google-signin-client_id')[0] as any).content,
+        scope: (document.getElementsByName('google-signin-scopes')[0] as any).content
+      };
+
+      gapi.auth2.init(clientConfig);
+      (window as any).gapiResolve();
+    });
+  }
+
+  async signIn(): Promise<any> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        let serverAuthCode = '';
+        let needsOfflineAccess = (document.getElementsByName(
+          'google-signin-force_server_auth_code'
+        )[0] as any).content === 'true' || false;
+        console.log('force server auth', needsOfflineAccess)
+
+        if (needsOfflineAccess) {
+          const offlineAccessResponse = await gapi.auth2.getAuthInstance().grantOfflineAccess();
+          serverAuthCode = offlineAccessResponse.code;
+        } else {
+          if (!this.isSignedIn())
+            await gapi.auth2.getAuthInstance().signIn();
+        }
+
+        const googleUser = gapi.auth2.getAuthInstance().currentUser.get();
+
+        if (needsOfflineAccess) {
+          // HACK: AuthResponse is null if we don't do this when using grantOfflineAccess
+          await googleUser.reloadAuthResponse();
+        }
+
+        const user = this.getUserFrom(googleUser);
+        user.serverAuthCode = serverAuthCode;
+        resolve(user);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async refresh(): Promise<Authentication> {
+    const authResponse = await gapi.auth2.getAuthInstance().currentUser.get().reloadAuthResponse()
+    return {
+      accessToken: authResponse.access_token,
+      idToken: authResponse.id_token
+    }
+  }
+
+  isSignedIn(): boolean {
+    return gapi.auth2.getAuthInstance().isSignedIn.get()
+  }
+
+  async signOut(): Promise<any> {
+    return gapi.auth2.getAuthInstance().signOut();
+  }
+
+  private async addUserChangeListener() {
+    await this.gapiLoaded;
+    gapi.auth2.getAuthInstance().currentUser.listen(googleUser => {
+      this.notifyListeners("userChange", googleUser.isSignedIn() ? this.getUserFrom(googleUser) : null);
+    });
+  }
+
+  private getUserFrom(googleUser: gapi.auth2.GoogleUser): User {
+    const user = {} as User;
+    const profile = googleUser.getBasicProfile();
+
+    user.email = profile.getEmail();
+    user.familyName = profile.getFamilyName();
+    user.givenName = profile.getGivenName();
+    user.id = profile.getId();
+    user.imageUrl = profile.getImageUrl();
+    user.name = profile.getName();
+
+    const authResponse = googleUser.getAuthResponse(true);
+    user.authentication = {
+      accessToken: authResponse.access_token,
+      idToken: authResponse.id_token
+    }
+
+    return user;
   }
 }
